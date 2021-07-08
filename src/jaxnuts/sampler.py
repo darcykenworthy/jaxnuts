@@ -676,7 +676,7 @@ class _plainNUTS:
         key, subkey = random.split(key)
         r = random.normal(subkey, shape=theta.shape)
 
-        logp, gradlogp = jnp.logp_and_grad(theta)
+        logp, gradlogp = self.logp_and_grad(theta)
         if jnp.isnan(logp):
             raise ValueError("log probability of initial value is NaN.")
 
