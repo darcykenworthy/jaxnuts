@@ -125,7 +125,7 @@ class NUTS:
         pbar.set_description("Adapting step size")
         for m in range(1, self.M_adapt + M + 1):
             # Initialize momentum and pick a slice, record the initial log joint probability
-            key, r, u, logjoint0 = self._init_iteration(thetas[m-1], key)
+            key, r, logu, logjoint0 = self._init_iteration(thetas[m-1], key)
             
             # Initialize the trajectory
             theta_m, theta_p, r_m, r_p = thetas[m-1], thetas[m-1], r, r
@@ -139,9 +139,9 @@ class NUTS:
                 
                 # Double the trajectory length in that direction
                 if v == -1:
-                    key, theta_m, r_m, _, _, theta_f, n_f, s_f, alpha, n_alpha = self._build_tree(theta_m, r_m, u, v, j, eps, logjoint0, key)
+                    key, theta_m, r_m, _, _, theta_f, n_f, s_f, alpha, n_alpha = self._build_tree(theta_m, r_m, logu, v, j, eps, logjoint0, key)
                 else:
-                    key, _, _, theta_p, r_p, theta_f, n_f, s_f, alpha, n_alpha = self._build_tree(theta_p, r_p, u, v, j, eps, logjoint0, key)
+                    key, _, _, theta_p, r_p, theta_f, n_f, s_f, alpha, n_alpha = self._build_tree(theta_p, r_p, logu, v, j, eps, logjoint0, key)
 
                 # Update theta with probability n_f / n, to effectively sample a point from the trajectory;
                 # Update the current length of the trajectory;
@@ -176,7 +176,7 @@ class NUTS:
             The updated PRNG key.
         r : ndarray
             The initial momentum vector.
-        u : float
+        logu : float
             The slice for this iteration.
         logjoint : float
             The logarithm of the joint probability p(theta, r)
@@ -185,8 +185,8 @@ class NUTS:
         r = random.normal(subkeys[0], shape=self.theta0.shape)
         logprob, _ = self.logp_and_grad(theta)
         logjoint = logprob - .5 * jnp.dot(r, r)
-        u = random.uniform(subkeys[1]) * jnp.exp(logjoint)
-        return key, r, u, logjoint
+        logu = jnp.log(random.uniform(subkeys[1])) + (logjoint)
+        return key, r, logu, logjoint
 
     @partial(jax.jit, static_argnums=0)
     def _draw_direction(self, key: ndarray) -> Tuple[ndarray, int]:
@@ -316,7 +316,7 @@ class NUTS:
         eps_bar = jnp.exp(mkappa * jnp.log(eps) + (1 - mkappa) * jnp.log(eps_bar))
         return H_bar, eps_bar, eps
 
-    def _build_tree(self, theta: ndarray, r: ndarray, u: float, v: int, j: int, 
+    def _build_tree(self, theta: ndarray, r: ndarray, logu: float, v: int, j: int, 
                    eps: float, logjoint0: ndarray, key: ndarray) -> Tuple[ndarray, 
                    ndarray, ndarray, ndarray, ndarray, ndarray, int, int, float, int]:
         """Recursively build the trajectory binary tree.
@@ -327,7 +327,7 @@ class NUTS:
             Sample position.
         r : ndarray
             Sample momentum.
-        u : float
+        logu : float
             Slice position.
         v : int
             Direction to take.
@@ -365,14 +365,14 @@ class NUTS:
             Total set size.
         """
         if j == 0: # Initialize the tree
-            return self._init_build_tree(theta, r, u, v, j, eps, logjoint0, key)
+            return self._init_build_tree(theta, r, logu, v, j, eps, logjoint0, key)
         else: # Recurse
-            key, theta_m, r_m, theta_p, r_p, theta_f, n_f, s_f, alpha_f, n_alpha_f = self._build_tree(theta, r, u, v, j - 1, eps, logjoint0, key)
+            key, theta_m, r_m, theta_p, r_p, theta_f, n_f, s_f, alpha_f, n_alpha_f = self._build_tree(theta, r, logu, v, j - 1, eps, logjoint0, key)
             if s_f == 1: # If no early stopping, recurse.
                 if v == -1:
-                    key, theta_m, r_m, _, _, theta_ff, n_ff, s_ff, alpha_ff, n_alpha_ff = self._build_tree(theta_m, r_m, u, v, j - 1, eps, logjoint0, key)
+                    key, theta_m, r_m, _, _, theta_ff, n_ff, s_ff, alpha_ff, n_alpha_ff = self._build_tree(theta_m, r_m, logu, v, j - 1, eps, logjoint0, key)
                 else:
-                    key, _, _, theta_p, r_p, theta_ff, n_ff, s_ff, alpha_ff, n_alpha_ff = self._build_tree(theta_p, r_p, u, v, j - 1, eps, logjoint0, key)
+                    key, _, _, theta_p, r_p, theta_ff, n_ff, s_ff, alpha_ff, n_alpha_ff = self._build_tree(theta_p, r_p, logu, v, j - 1, eps, logjoint0, key)
                 
                 # Update theta with probability n_ff / (n_f + n_ff);
                 # Update the stopping indicator (U-turn);
@@ -382,7 +382,7 @@ class NUTS:
             return key, theta_m, r_m, theta_p, r_p, theta_f, n_f, s_f, alpha_f, n_alpha_f
         
     @partial(jax.jit, static_argnums=0)
-    def _init_build_tree(self, theta : ndarray, r : ndarray, u : float, v : int, j : int, 
+    def _init_build_tree(self, theta : ndarray, r : ndarray, logu : float, v : int, j : int, 
                          eps : float, logjoint0 : float, key : ndarray) -> Tuple[ndarray, 
                          ndarray, ndarray, ndarray, ndarray, ndarray, int, int, float, int]:
         """Initialize the trajectory binary tree."""
@@ -390,9 +390,9 @@ class NUTS:
         theta, r, logp, _ = self._leapfrog(theta, r, v * eps)
         logjoint = logp - .5 * jnp.dot(r, r)
         # Check if the step is within the slice
-        n_f = (jnp.log(u) <= logjoint).astype(int)
+        n_f = (logu <= logjoint).astype(int)
         # Check that we are not completely off-track
-        s_f = (jnp.log(u) < logjoint + self.delta_max).astype(int)
+        s_f = (logu < logjoint + self.delta_max).astype(int)
         # Compute the acceptance rate
         prob_ratio = jnp.exp(logjoint - logjoint0)
         alpha_f = lax.cond(jnp.isnan(prob_ratio), lambda _: 0., lambda _: lax.min(prob_ratio, 1.), None) # Presumably if the probability ratio diverges,
